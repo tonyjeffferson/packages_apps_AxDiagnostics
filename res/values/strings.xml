@@ -171,6 +171,8 @@
     <string name="label_rate">Rate</string>
 
     <string name="cpu_usage">CPU Usage</string>
+    <string name="cpu_stats_unavailable_title">CPU statistics unavailable</string>
+    <string name="cpu_stats_unavailable_desc">Android denied access to the system CPU counters. Other diagnostics can still be used, but CPU usage details are unavailable.</string>
     <string name="cpu_usage_history">CPU Usage History</string>
     <string name="cpu_usage_breakdown">CPU Usage Breakdown</string>
     <string name="cpu_load_1min_detail">1 min load %1$.2f</string>
