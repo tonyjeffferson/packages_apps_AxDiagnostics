@@ -16,8 +16,6 @@
 
 package com.axion.diagnostics.data
 
-import com.android.internal.kernel.AxKernelControl
-import com.android.internal.kernel.AxKernelManager
 import java.io.File
 
 data class GpuSnapshot(
@@ -32,36 +30,7 @@ data class GpuSnapshot(
 
 object GpuCollector {
 
-    fun collect(): GpuSnapshot =
-        collectFromKernelManager() ?: collectFromKernelConfig()
-
-    private fun collectFromKernelManager(): GpuSnapshot? {
-        val metrics = runCatching { AxKernelManager.getMetrics() }.getOrNull() ?: return null
-        val gpu = metrics.gpu ?: return null
-        if (gpu.currentFrequencyHz <= 0L && gpu.maxFrequencyHz <= 0L && gpu.usagePercent <= 0f) return null
-
-        val curFreq = (gpu.currentFrequencyHz / 1_000_000L).toInt()
-        val maxFreq = (gpu.maxFrequencyHz / 1_000_000L).toInt()
-        val minFreq = (gpu.minFrequencyHz / 1_000_000L).toInt()
-        val busy = gpu.usagePercent.toInt().coerceIn(0, 100)
-        val controls = runCatching { AxKernelManager.getControls() }.getOrNull() ?: emptyList()
-        val gpuControl = controls.firstOrNull {
-            it.type == AxKernelControl.TYPE_GPU_MAX_FREQ || it.type == AxKernelControl.TYPE_GPU_MIN_FREQ
-        }
-        val availFreqs = gpuControl?.availableValues?.map { normalizeFrequency(it) }?.distinct()?.sorted()
-            ?: KernelConfig.gpuConfig.values.ifEmpty { emptyList() }
-        val governor = findGpuGovernor()
-
-        return GpuSnapshot(
-            frequencyMhz = curFreq,
-            maxFrequencyMhz = maxFreq,
-            minFrequencyMhz = minFreq,
-            busyPercent = busy,
-            governor = governor,
-            availableFrequencies = availFreqs,
-            available = true
-        )
-    }
+    fun collect(): GpuSnapshot = collectFromKernelConfig()
 
     private fun collectFromKernelConfig(): GpuSnapshot {
         val config = KernelConfig.gpuConfig
@@ -84,13 +53,24 @@ object GpuCollector {
         if (node == null) return 0
         val file = File(node)
         if (!file.exists()) return 0
-        return runCatching { file.readText().trim().replace("%", "").toInt() }.getOrDefault(0).coerceIn(0, 100)
+        val raw = runCatching { file.readText().trim() }.getOrDefault("")
+        val percent = raw.replace("%", "").toIntOrNull()
+        if (percent != null) return percent.coerceIn(0, 100)
+        val counters = raw.split("\\s+".toRegex()).mapNotNull { it.toLongOrNull() }
+        val busy = counters.getOrNull(0) ?: return 0
+        val total = counters.getOrNull(1) ?: return 0
+        return if (total > 0) (busy * 100 / total).toInt().coerceIn(0, 100) else 0
     }
 
     private fun readScaledFreqFromNode(baseNode: String?, fileName: String): Int {
         if (baseNode == null) return 0
-        val file = File(baseNode, fileName)
-        if (!file.exists()) return 0
+        val base = File(baseNode)
+        val alternateNames = when (fileName) {
+            "max_freq" -> listOf("max_freq", "max_gpuclk", "gpu_max_clock")
+            "min_freq" -> listOf("min_freq", "min_gpuclk", "gpu_min_clock")
+            else -> listOf(fileName)
+        }
+        val file = alternateNames.map { File(base, it) }.firstOrNull { it.exists() } ?: return 0
         val raw = runCatching { file.readText().trim().toLong() }.getOrDefault(0L)
         return KernelConfig.scaleFreqToMhz(raw)
     }
@@ -113,6 +93,4 @@ object GpuCollector {
         return "unknown"
     }
 
-    private fun normalizeFrequency(freq: Int): Int =
-        if (freq > 100_000_000) freq / 1_000_000 else if (freq > 100_000) freq / 1_000 else freq
 }

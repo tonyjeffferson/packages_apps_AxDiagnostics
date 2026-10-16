@@ -52,24 +52,35 @@ import com.axion.diagnostics.util.LaunchedActiveEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.io.IOException
 
 @Composable
 fun CpuScreen(modifier: Modifier = Modifier) {
     var cpu by remember { mutableStateOf<CpuSnapshot?>(null) }
     var processes by remember { mutableStateOf<List<ProcessSnapshot>>(emptyList()) }
     var usageHistory by remember { mutableStateOf<List<Float>>(emptyList()) }
+    var cpuUnavailable by remember { mutableStateOf(false) }
 
     LaunchedActiveEffect {
         while (true) {
-            val snapshot = withContext(Dispatchers.IO) {
-                CpuUiSnapshot(
-                    cpu = CpuCollector.collect(),
-                    processes = ProcessCollector.collect(15)
-                )
+            try {
+                val snapshot = withContext(Dispatchers.IO) {
+                    CpuUiSnapshot(
+                        cpu = CpuCollector.collect(),
+                        processes = ProcessCollector.collect(15)
+                    )
+                }
+                cpu = snapshot.cpu
+                processes = snapshot.processes
+                usageHistory = (usageHistory + snapshot.cpu.totalUsage).takeLast(32)
+                cpuUnavailable = false
+            } catch (e: IOException) {
+                // Android may restrict global procfs counters to system services.
+                // Keep a precomposed pager page from crashing the entire app.
+                cpu = null
+                processes = emptyList()
+                cpuUnavailable = true
             }
-            cpu = snapshot.cpu
-            processes = snapshot.processes
-            usageHistory = (usageHistory + snapshot.cpu.totalUsage).takeLast(32)
             delay(2000)
         }
     }
@@ -81,6 +92,16 @@ fun CpuScreen(modifier: Modifier = Modifier) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        if (cpuUnavailable) {
+            StatCard(stringResource(R.string.cpu_stats_unavailable_title)) {
+                Text(
+                    stringResource(R.string.cpu_stats_unavailable_desc),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
         cpu?.let { c ->
             MetricProgressCard(
                 title = stringResource(R.string.cpu_usage),

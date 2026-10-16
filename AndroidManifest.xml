@@ -27,6 +27,7 @@
 
     <application
         android:label="@string/app_name"
+        android:icon="@drawable/ic_axdiagnostics_launcher"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:supportsRtl="true">
 
@@ -37,6 +38,7 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <intent-filter>
                 <action android:name="com.axion.diagnostics.LAUNCH" />
