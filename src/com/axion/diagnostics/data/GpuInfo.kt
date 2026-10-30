@@ -30,67 +30,103 @@ data class GpuSnapshot(
 
 object GpuCollector {
 
-    fun collect(): GpuSnapshot = collectFromKernelConfig()
-
-    private fun collectFromKernelConfig(): GpuSnapshot {
+    fun collect(): GpuSnapshot {
         val config = KernelConfig.gpuConfig
-        val currentNode = config.currentNode ?: return GpuSnapshot(0, 0, 0, 0, "unavailable", emptyList(), false)
-        val freqFile = File(currentNode)
-        if (!freqFile.exists()) return GpuSnapshot(0, 0, 0, 0, "unavailable", emptyList(), false)
-        val rawFreq = runCatching { freqFile.readText().trim().toLong() }.getOrDefault(0L)
-        val curFreq = KernelConfig.scaleFreqToMhz(rawFreq)
-        if (curFreq <= 0) return GpuSnapshot(0, 0, 0, 0, "unavailable", emptyList(), false)
-
-        val busy = readBusyFromNode(config.usageNode)
-        val governor = findGpuGovernor()
-        val maxFreq = readScaledFreqFromNode(config.node, "max_freq")
-        val minFreq = readScaledFreqFromNode(config.node, "min_freq")
-
-        return GpuSnapshot(curFreq, maxFreq, minFreq, busy, governor, config.values, true)
-    }
-
-    private fun readBusyFromNode(node: String?): Int {
-        if (node == null) return 0
-        val file = File(node)
-        if (!file.exists()) return 0
-        val raw = runCatching { file.readText().trim() }.getOrDefault("")
-        val percent = raw.replace("%", "").toIntOrNull()
-        if (percent != null) return percent.coerceIn(0, 100)
-        val counters = raw.split("\\s+".toRegex()).mapNotNull { it.toLongOrNull() }
-        val busy = counters.getOrNull(0) ?: return 0
-        val total = counters.getOrNull(1) ?: return 0
-        return if (total > 0) (busy * 100 / total).toInt().coerceIn(0, 100) else 0
-    }
-
-    private fun readScaledFreqFromNode(baseNode: String?, fileName: String): Int {
-        if (baseNode == null) return 0
-        val base = File(baseNode)
-        val alternateNames = when (fileName) {
-            "max_freq" -> listOf("max_freq", "max_gpuclk", "gpu_max_clock")
-            "min_freq" -> listOf("min_freq", "min_gpuclk", "gpu_min_clock")
-            else -> listOf(fileName)
+        val gpuRoot = File("/sys/class/kgsl/kgsl-3d0")
+        val devfreq = firstExistingDirectory(
+            config.node,
+            "/sys/class/kgsl/kgsl-3d0/devfreq",
+            "/sys/class/devfreq/1c00000.qcom,kgsl-3d0",
+            "/sys/class/devfreq/gpufreq"
+        )
+        val current = firstExistingFile(
+            config.currentNode,
+            File(gpuRoot, "gpuclk").path,
+            File(devfreq ?: gpuRoot, "cur_freq").path,
+            File(devfreq ?: gpuRoot, "scaling_cur_freq").path
+        )
+        val currentMhz = current?.let { readFrequencyMhz(it) } ?: 0
+        if (currentMhz <= 0) {
+            return GpuSnapshot(0, 0, 0, 0, "unavailable", emptyList(), false)
         }
-        val file = alternateNames.map { File(base, it) }.firstOrNull { it.exists() } ?: return 0
-        val raw = runCatching { file.readText().trim().toLong() }.getOrDefault(0L)
+
+        val maxFreq = readFrequencyMhz(firstExistingFile(
+            File(devfreq ?: gpuRoot, "max_freq").path,
+            File(gpuRoot, "max_gpuclk").path,
+            File(gpuRoot, "gpu_max_clock").path
+        ))
+        val minFreq = readFrequencyMhz(firstExistingFile(
+            File(devfreq ?: gpuRoot, "min_freq").path,
+            File(gpuRoot, "min_gpuclk").path,
+            File(gpuRoot, "gpu_min_clock").path
+        ))
+        val busyNode = firstExistingFile(
+            config.usageNode,
+            File(gpuRoot, "gpu_busy_percentage").path,
+            File(gpuRoot, "gpubusy").path
+        )
+        val availableNode = firstExistingFile(
+            File(gpuRoot, "gpu_available_frequencies").path,
+            File(devfreq ?: gpuRoot, "available_frequencies").path,
+            File(devfreq ?: gpuRoot, "scaling_available_frequencies").path
+        )
+        val availableFrequencies = config.values.ifEmpty {
+            readAvailableFrequencies(availableNode)
+        }
+        val governor = readText(firstExistingFile(
+            File(devfreq ?: gpuRoot, "governor").path,
+            File(gpuRoot, "governor").path
+        )) ?: "unknown"
+
+        return GpuSnapshot(
+            frequencyMhz = currentMhz,
+            maxFrequencyMhz = maxFreq,
+            minFrequencyMhz = minFreq,
+            busyPercent = readBusyPercent(busyNode),
+            governor = governor,
+            availableFrequencies = availableFrequencies,
+            available = true
+        )
+    }
+
+    private fun firstExistingDirectory(vararg paths: String?): File? = paths
+        .filterNotNull()
+        .map(::File)
+        .firstOrNull { it.isDirectory }
+
+    private fun firstExistingFile(vararg paths: String?): File? = paths
+        .filterNotNull()
+        .map(::File)
+        .firstOrNull { it.isFile }
+
+    private fun readText(file: File?): String? = file?.let {
+        runCatching { it.readText().trim() }.getOrNull()?.takeIf(String::isNotEmpty)
+    }
+
+    private fun readFrequencyMhz(file: File?): Int {
+        val raw = readText(file)?.let { Regex("\\d+").find(it)?.value?.toLongOrNull() } ?: return 0
         return KernelConfig.scaleFreqToMhz(raw)
     }
 
-    private fun findGpuGovernor(): String {
-        val configNode = KernelConfig.gpuConfig.node
-        if (configNode != null) {
-            val gov = runCatching { File(configNode, "governor").readText().trim() }.getOrNull()
-            if (!gov.isNullOrEmpty()) return gov
-        }
-        val fallbackNodes = listOf(
-            "/sys/class/kgsl/kgsl-3d0/devfreq/governor",
-            "/sys/class/devfreq/1c00000.qcom,kgsl-3d0/governor",
-            "/sys/class/devfreq/gpufreq/governor"
-        )
-        for (path in fallbackNodes) {
-            val gov = runCatching { File(path).readText().trim() }.getOrNull()
-            if (!gov.isNullOrEmpty()) return gov
-        }
-        return "unknown"
+    private fun readBusyPercent(file: File?): Int {
+        val values = readText(file)
+            ?.let { text -> Regex("\\d+").findAll(text).mapNotNull { it.value.toLongOrNull() }.take(2).toList() }
+            ?: return 0
+        val busy = values.firstOrNull() ?: return 0
+        val total = values.getOrNull(1)
+        val percent = if (total != null && total > 0) (busy * 100 / total) else busy
+        return percent.toInt().coerceIn(0, 100)
     }
 
+    private fun readAvailableFrequencies(file: File?): List<Int> = readText(file)
+        ?.let { text ->
+            Regex("\\d+").findAll(text)
+                .mapNotNull { it.value.toLongOrNull() }
+                .map { KernelConfig.scaleFreqToMhz(it) }
+                .filter { it > 0 }
+                .distinct()
+                .sorted()
+                .toList()
+        }
+        ?: emptyList()
 }
