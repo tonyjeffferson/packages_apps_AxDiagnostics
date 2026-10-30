@@ -164,7 +164,45 @@ object CpuCollector {
                 }
             }
         }
+
+        val policyRoot = File("/sys/devices/system/cpu/cpufreq")
+        val policy = policyRoot.listFiles()
+            ?.filter { it.isDirectory && it.name.startsWith("policy") }
+            ?.firstOrNull { policyDir ->
+                val cpuList = sequenceOf("related_cpus", "affected_cpus")
+                    .map { File(policyDir, it) }
+                    .firstOrNull { it.exists() }
+                    ?.let { runCatching { it.readText().trim() }.getOrNull() }
+                cpuList?.let { parseCpuList(it).contains(coreIdx) } == true
+            }
+        if (policy != null) {
+            return policy.asCpuClusterConfig()
+        }
+
+        val directPolicy = File("/sys/devices/system/cpu/cpu$coreIdx/cpufreq")
+        if (directPolicy.isDirectory) {
+            return directPolicy.asCpuClusterConfig()
+        }
         return null
+    }
+
+    private fun File.asCpuClusterConfig() = CpuClusterConfig(
+        id = name,
+        group = name,
+        minNode = File(this, "scaling_min_freq").path,
+        maxNode = File(this, "scaling_max_freq").path,
+        availablePath = File(this, "scaling_available_frequencies").path,
+        governorNode = File(this, "scaling_governor").path,
+        governorAvailablePath = File(this, "scaling_available_governors").path
+    )
+
+    private fun readTextFile(file: File): String =
+        if (file.exists()) runCatching { file.readText().trim() }.getOrDefault("unknown") else "unknown"
+
+    private fun readFrequencyMhz(file: File): Int {
+        if (!file.exists()) return 0
+        val raw = runCatching { file.readText().trim().toLong() }.getOrNull() ?: return 0
+        return normalizeToMhz(raw)
     }
 
     private fun getBusFrequencyMhz(busType: String): Int {
@@ -254,16 +292,4 @@ object CpuCollector {
         if (end < start || end - start > 4096) emptyList() else (start..end).toList()
     }.toSet()
 
-    private fun readFrequencyMhz(file: File): Int {
-        val value = runCatching { file.readText().trim().toLong() }.getOrDefault(0L)
-        return when {
-            value > 10_000_000_000L -> (value / 1_000_000L).toInt()
-            value > 10_000_000L -> (value / 1_000_000L).toInt()
-            value > 10_000L -> (value / 1_000L).toInt()
-            else -> value.toInt()
-        }
-    }
-
-    private fun readTextFile(file: File): String =
-        if (file.exists()) runCatching { file.readText().trim() }.getOrDefault("unknown") else "unknown"
 }
